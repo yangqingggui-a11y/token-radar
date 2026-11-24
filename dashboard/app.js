@@ -489,8 +489,7 @@
           el('b', { text: auditOk + ' / ' + auditAll }),
           ' rows reproduce the dollar board.json carries' + (ok ? ', including the top row.' : '; the rows that differ should not be trusted.')
         ),
-        el('p', { text: 'Launch prior: every training row is a token that trades; a pre-token protocol\'s token does not exist yet. The fitted value is multiplied by ' + FIT.shrink + ', a stated 35% launch-risk discount. It multiplies every row alike, so it moves no rank; growth\'s prior changes value, not the evidence.' }),
-        el('p', { text: 'What the fit found, and did not: ln(TVL) is the one strong term (t ' + fmtNum(FIT.ln_tvl / FIT.ln_tvl_se, 1) + '), and its exponent is below 1, so a protocol with more TVL is worth more at a falling multiple of it. Family effects rest on 2 to ' + Math.max.apply(null, FIT.families.map(function (f) { return f.n; })) + ' protocols each, so each prints its sample size and t rather than posing as settled. Age and chains keep the signs the data gave; age\'s is negative and its t is ' + fmtNum(FIT.ln_age / FIT.ln_age_se, 1) + ', a weak effect stated as one.' })
+        el('p', { text: 'Launch prior: a training row is a token that trades; a pre-token protocol\'s token does not exist yet, so the fit\'s value is multiplied by ' + FIT.shrink + ', a stated 35% launch-risk discount. It multiplies every row alike. ln(TVL) is the one strong term (t ' + fmtNum(FIT.ln_tvl / FIT.ln_tvl_se, 1) + ') and its exponent is below 1, so more TVL is worth more at a falling multiple; family effects rest on 2 to ' + Math.max.apply(null, FIT.families.map(function (f) { return f.n; })) + ' rows each and print their n and t rather than posing as settled.' })
       ),
       el('section', null,
         el('h2', { text: 'Families: fitted effect and observed market' }),
@@ -514,7 +513,9 @@
               el('span', { class: 'fcount', text: fmtNum(f.t, 1) })
             );
           })
-        )
+        ),
+        el('h3', { text: 'Backtest · ' + FIT.holdout.n + ' held-out rows' }),
+        el('p', { class: 'resid', text: 'RMSE ' + fmtNum(FIT.holdout.rmse_log, 2) + ' · MAE ' + fmtNum(FIT.holdout.mae_log, 2) + ' · R² ' + fmtNum(FIT.holdout.r2, 2) + ' ln. Predicted tercile → actual: ' + FIT.backtest.bins.map(function (b) { return fmtUsd(b.predicted_usd) + ' → ' + fmtUsd(b.actual_usd) + ' (n ' + b.n + ')'; }).join(' · ') + '. The fit compresses the extremes, so the board\'s claim is the order, not the exact dollar. Median residual by family (ln): ' + FIT.backtest.families.map(function (f) { return f.key + ' ' + (f.median_residual >= 0 ? '+' : '') + f.median_residual.toFixed(2); }).join(' · ') + '.' })
       )
     );
   }

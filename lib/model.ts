@@ -93,6 +93,11 @@ export interface Fit {
   cex_coef: number;
   cex_n: number;
   holdout: { n: number; rmse_log: number; mae_log: number; r2: number };
+  /** Calibration on the held-out rows: predicted vs actual by predicted tercile, and residuals by family. */
+  backtest: {
+    bins: { predicted_usd: number; actual_usd: number; n: number }[];
+    families: { key: string; n: number; median_residual: number }[];
+  };
   shrink: number;
   /** Protocols with a market cap at or below zero: their log value is undefined, so they are not fitted. */
   excluded_nonpositive: number;
@@ -489,6 +494,7 @@ export function fitModel(snapshot: Snapshot): Fit {
   const held = allRows.filter((r) => hash32(r.slug) % 5 === 0);
   const train = allRows.filter((r) => hash32(r.slug) % 5 !== 0);
   let holdout = { n: 0, rmse_log: 0, mae_log: 0, r2: 0 };
+  const backtest: Fit['backtest'] = { bins: [], families: [] };
   if (held.length >= 10 && train.length > k + 10) {
     const inner = ols(train, k);
     let ss = 0;
@@ -497,6 +503,7 @@ export function fitModel(snapshot: Snapshot): Fit {
     for (const r of held) meanHeld += r.y + growthPrior * r.chg;
     meanHeld /= held.length;
     let sstHeld = 0;
+    const pairs: { family: string; pred: number; actual: number }[] = [];
     for (const r of held) {
       // Compare on the original scale: r.y is the growth-adjusted target, so add the prior term back.
       const z = predictDisplayed(r, inner.beta);
@@ -505,8 +512,29 @@ export function fitModel(snapshot: Snapshot): Fit {
       ss += residual * residual;
       aa += Math.abs(residual);
       sstHeld += (actual - meanHeld) * (actual - meanHeld);
+      pairs.push({ family: r.family, pred: z, actual });
     }
     holdout = { n: held.length, rmse_log: Math.sqrt(ss / held.length), mae_log: aa / held.length, r2: 1 - ss / sstHeld };
+
+    // Calibration by predicted tercile: the median prediction against the median outcome in each.
+    const sorted = [...pairs].sort((a, b) => a.pred - b.pred || byCodeUnit(a.family, b.family));
+    for (let i = 0; i < 3; i++) {
+      const lo = Math.floor((sorted.length * i) / 3);
+      const hi = Math.floor((sorted.length * (i + 1)) / 3);
+      const slice = sorted.slice(lo, hi);
+      if (slice.length === 0) continue;
+      backtest.bins.push({
+        predicted_usd: Math.round(Math.exp(median(slice.map((s) => s.pred)))),
+        actual_usd: Math.round(Math.exp(median(slice.map((s) => s.actual)))),
+        n: slice.length,
+      });
+    }
+    // Where the fit misses by family, in log points on the rows it did not see.
+    const keys = [...new Set(pairs.map((p) => p.family))].sort(byCodeUnit);
+    for (const key of keys) {
+      const residuals = pairs.filter((p) => p.family === key).map((p) => p.actual - p.pred);
+      backtest.families.push({ key, n: residuals.length, median_residual: Math.round(median(residuals) * 1000) / 1000 });
+    }
   }
 
   const fit = ols(allRows, k);
@@ -564,6 +592,7 @@ export function fitModel(snapshot: Snapshot): Fit {
     cex_coef: beta[cexAt]!,
     cex_n: cexRows.length,
     holdout,
+    backtest,
     shrink: MODEL.shrink,
     excluded_nonpositive: snapshot.protocols.filter((p) => p.mcap_usd !== null && p.mcap_usd <= 0).length,
   };
