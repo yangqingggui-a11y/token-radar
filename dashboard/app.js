@@ -1,9 +1,9 @@
 // Token Radar's page. It reads window.RADAR, the dataset main.ts writes beside the page, and renders
-// the ranked board, a filterable table, a per-protocol detail drawer and the methodology panel. No
-// network: every byte it shows comes from data.js, and every figure it shows is the board's own.
+// the ranked board, a filterable table, a per-protocol detail drawer and the fitted model's evidence.
+// No network: every byte it shows comes from data.js.
 //
-// The one function that matters is recompute(): the page applies the same formula as lib/model.ts to
-// each row's raw snapshot figures, and prints whether the result is the dollar board.json carries. The
+// The one function that matters is recompute(): the page re-runs lib/model.ts's fitted equation on
+// each row's raw snapshot figures and prints whether the result is the dollar board.json carries. The
 // board is not a table someone typed: it is this arithmetic, checked on every row at load.
 (function () {
   'use strict';
@@ -15,6 +15,17 @@
     return;
   }
 
+  var FIT = DATA.fit;
+  var MODEL = DATA.model;
+  var FAMILY_COEF = {};
+  var FAMILY_MULT = {};
+  var FAMILY_LABEL = {};
+  DATA.families.forEach(function (f) {
+    FAMILY_COEF[f.key] = f.coef;
+    FAMILY_MULT[f.key] = f.multiplier;
+    FAMILY_LABEL[f.key] = f.label;
+  });
+
   // ------------------------------------------------------------------ formatting
 
   var NF = new Intl.NumberFormat('en-US');
@@ -23,9 +34,9 @@
     var abs = Math.abs(n);
     if (abs >= 1e12) return '$' + (n / 1e12).toFixed(2) + 'T';
     if (abs >= 1e9) return '$' + (n / 1e9).toFixed(2) + 'B';
-    if (abs >= 1e6) return '$' + (n / 1e6).toFixed(1) + 'M';
-    if (abs >= 1e3) return '$' + (n / 1e3).toFixed(0) + 'K';
-    return '$' + NF.format(n);
+    if (abs >= 1e6) return '$' + (n / 1e6).toFixed(2) + 'M';
+    if (abs >= 1e3) return '$' + (n / 1e3).toFixed(1) + 'K';
+    return '$' + NF.format(Math.round(n));
   }
   function fmtDollars(n) {
     if (n === null || n === undefined || !isFinite(n)) return 'n/a';
@@ -39,13 +50,19 @@
     if (days === null || days === undefined) return '—';
     return NF.format(Math.max(0, Math.round(days))) + ' d';
   }
-  function fmtFactor(n, places) {
-    if (n === null || n === undefined) return '—';
-    return n.toFixed(places === undefined ? 2 : places);
+  function fmtNum(n, places) {
+    if (n === null || n === undefined || !isFinite(n)) return '—';
+    return n.toFixed(places === undefined ? 3 : places);
+  }
+  function factorText(x) {
+    if (!isFinite(x) || x <= 0) return '—';
+    if (x >= 1e5 || x < 1e-3) return '×' + x.toExponential(2).replace('e+', 'e');
+    if (x >= 100) return '×' + NF.format(Math.round(x));
+    if (x >= 10) return '×' + x.toFixed(1);
+    return '×' + x.toFixed(4);
   }
   function fmtDate(iso) {
-    if (!iso) return '—';
-    return iso;
+    return iso || '—';
   }
   function fmtChains(chains, limit) {
     if (!chains || chains.length === 0) return 'an unnamed chain';
@@ -53,41 +70,41 @@
     return chains.length > (limit || 2) ? head + ' +' + (chains.length - (limit || 2)) : head;
   }
 
-  // ------------------------------------------------------------------ the model, mirrored
+  // ------------------------------------------------------------------ the fitted equation, mirrored
 
-  var MODEL = DATA.model;
-  var MULT = {};
-  DATA.families.forEach(function (f) { MULT[f.key] = f.multiple; });
+  var MEDIAN_AGE = FIT.median_age;
+  var SCALE = FIT.change_scale;
 
-  // The formula in lib/model.ts, applied here to the row's raw snapshot figures. The order of the
-  // multiplications is the same so the floating-point result is the same, and the page can state that
-  // its own arithmetic reproduces the board rather than merely describing it.
-  function factorsOf(row) {
-    var change = row.change_7d === null || row.change_7d === undefined ? null : row.change_7d;
-    var momentum = change === null
-      ? MODEL.unknown_momentum
-      : Math.min(MODEL.momentum_cap, Math.max(MODEL.momentum_floor, 1 + (change / 100) * MODEL.momentum_weight));
-    var age = row.age_days;
-    var maturity = age === null || age === undefined || age < 1 ? MODEL.unknown_maturity : 1 + Math.log10(age) / MODEL.maturity_log_divisor;
+  // Exactly lib/model.ts's terms, in the same order, so the floating-point sum and the page's check
+  // are the same arithmetic. The coefficients are the fit's own, not copies of a rounded display.
+  function termsOf(row) {
+    var lnTvl = Math.log(row.tvl_usd);
+    var lnAge = row.age_days === null || row.age_days === undefined || row.age_days < 1 ? Math.log(MEDIAN_AGE) : Math.log(row.age_days);
+    var change = row.change_7d === null || row.change_7d === undefined ? 0 : SCALE * Math.tanh(row.change_7d / SCALE);
     var chains = row.chain_count === undefined ? (row.chains ? row.chains.length : 0) : row.chain_count;
-    var chainMultiple = 1 + Math.min(Math.max(chains - 1, 0), MODEL.chain_cap) * MODEL.chain_step;
-    return { category: MULT[row.family], momentum: momentum, maturity: maturity, chains: chainMultiple };
+    var missing = row.age_days === null || row.age_days === undefined ? 1 : 0;
+    var fam = FAMILY_COEF[row.family] === undefined ? 0 : FAMILY_COEF[row.family];
+    var tvlTerm = FIT.ln_tvl * lnTvl;
+    var ageTerm = FIT.ln_age * lnAge;
+    var changeTerm = FIT.change * change;
+    var chainTerm = FIT.chains * chains;
+    var missingTerm = FIT.age_missing * missing;
+    return {
+      lnTvl: lnTvl, lnAge: lnAge, change: change, chains: chains, missing: missing, family: fam,
+      tvlTerm: tvlTerm, ageTerm: ageTerm, changeTerm: changeTerm, chainTerm: chainTerm, missingTerm: missingTerm,
+      z: FIT.intercept + tvlTerm + ageTerm + changeTerm + chainTerm + missingTerm + fam
+    };
   }
 
   function recompute(row) {
-    var f = factorsOf(row);
-    return Math.max(1, Math.round(row.tvl_usd * f.category * f.momentum * f.maturity * f.chains));
+    var t = termsOf(row);
+    return Math.max(1, Math.round(Math.exp(t.z) * FIT.shrink));
   }
 
   var auditOk = 0;
   DATA.rows.forEach(function (r) { if (recompute(r) === r.implied_value_usd) auditOk += 1; });
   var auditAll = DATA.rows.length;
   var maxLiveMcap = DATA.live.reduce(function (m, r) { return Math.max(m, r.mcap_usd || 0); }, 1);
-
-  var maturityRange = DATA.rows.reduce(function (acc, r) {
-    var v = r.model.maturity;
-    return { min: Math.min(acc.min, v), max: Math.max(acc.max, v) };
-  }, { min: Infinity, max: -Infinity });
 
   // ------------------------------------------------------------------ state
 
@@ -98,7 +115,7 @@
     if (!raw) return;
     var p = new URLSearchParams(raw);
     if (p.get('q')) state.q = p.get('q');
-    if (p.get('family') && MULT[p.get('family')]) state.family = p.get('family');
+    if (p.get('family') && FAMILY_COEF[p.get('family')] !== undefined) state.family = p.get('family');
     if (p.get('chain')) state.chain = p.get('chain');
     if (p.get('status') === 'live') state.status = 'live';
     if (p.get('watch') === '1') state.watch = true;
@@ -121,8 +138,6 @@
     try {
       window.history.replaceState(null, '', next ? '#' + next : base);
     } catch (e) {
-      // A page opened from disk may refuse a history write; the filters still work, only the URL
-      // keeps the state it had.
       if (next) window.location.hash = next;
     }
   }
@@ -194,13 +209,12 @@
   // ------------------------------------------------------------------ header pieces
 
   function kpis() {
-    var top = DATA.rows[0];
     return el('section', { class: 'kpis', 'aria-label': 'Snapshot facts' },
       kpi('Watchlist covered', DATA.watchlist_covered + ' / ' + DATA.watchlist_size, 'every slug in the sealed list', 'signal', true),
-      kpi('Pre-token rows', String(DATA.board_size), 'each one scored by the model', 'signal', false),
+      kpi('Pre-token rows', String(DATA.board_size), 'each one scored by the fitted equation', 'signal', false),
       kpi('Early rows', String(DATA.early_size), 'below the ' + fmtUsd(DATA.floor_usd) + ' floor', 'amber', false),
       kpi('Live tokens set aside', String(DATA.live_size), 'their market cap is a fact', 'plain', false),
-      kpi('Top implied value', top ? fmtUsd(top.implied_value_usd) : '—', top ? top.name : '', 'plain', false)
+      kpi('Fit R²', FIT.r2.toFixed(3), FIT.n + ' tokenized protocols, ' + FIT.features + ' terms', 'signal', false)
     );
   }
   function kpi(label, value, note, tone, signal) {
@@ -212,21 +226,23 @@
   }
 
   function formulaStrip() {
-    return el('section', { class: 'formula-strip', 'aria-label': 'The value model' },
+    return el('section', { class: 'formula-strip', 'aria-label': 'The fitted value model' },
       el('div', null,
-        el('p', { class: 'formula-label', text: 'The model · ' + DATA.model_version }),
+        el('p', { class: 'formula-label', text: 'The fitted model · ' + DATA.model_version }),
         el('p', { class: 'formula' },
-          'implied = TVL × category × momentum × maturity × chains',
+          'ln(mcap) = ' + fmtNum(FIT.intercept, 3) + (FIT.ln_tvl >= 0 ? ' + ' : ' − ') + fmtNum(Math.abs(FIT.ln_tvl), 3) + '·ln TVL'
+            + (FIT.ln_age >= 0 ? ' + ' : ' − ') + fmtNum(Math.abs(FIT.ln_age), 3) + '·ln age'
+            + (FIT.change >= 0 ? ' + ' : ' − ') + fmtNum(Math.abs(FIT.change), 3) + '·' + SCALE + '·tanh(7d/' + SCALE + ')'
+            + (FIT.chains >= 0 ? ' + ' : ' − ') + fmtNum(Math.abs(FIT.chains), 3) + '·chains + family',
           el('br'),
-          'momentum = clamp(1 + 7d/100 × ' + MODEL.momentum_weight + ', ' + MODEL.momentum_floor + ', ' + MODEL.momentum_cap + ') · ',
-          'maturity = 1 + log10(days listed)/' + MODEL.maturity_log_divisor
+          'implied = exp(ln mcap) × ' + FIT.shrink + ' launch prior · least squares on ' + FIT.n + ' tokens · holdout RMSE ' + fmtNum(FIT.holdout.rmse_log, 2) + ' log points on ' + FIT.holdout.n
         )
       ),
       el('div', { class: 'factors' },
-        el('span', { class: 'factor' }, 'category ', el('b', { text: '0.30–0.60' })),
-        el('span', { class: 'factor' }, 'momentum ', el('b', { text: fmtFactor(MODEL.momentum_floor) + '–' + fmtFactor(MODEL.momentum_cap) })),
-        el('span', { class: 'factor' }, 'maturity ', el('b', { text: fmtFactor(maturityRange.min) + '–' + fmtFactor(maturityRange.max) })),
-        el('span', { class: 'factor' }, 'chains ', el('b', { text: '1.00–' + fmtFactor(1 + MODEL.chain_cap * MODEL.chain_step) }))
+        el('span', { class: 'factor' }, 'n ', el('b', { text: String(FIT.n) })),
+        el('span', { class: 'factor' }, 'R² ', el('b', { text: fmtNum(FIT.r2, 3) })),
+        el('span', { class: 'factor' }, 'adj R² ', el('b', { text: fmtNum(FIT.adj_r2, 3) })),
+        el('span', { class: 'factor' }, 'RMSE ', el('b', { text: fmtNum(FIT.rmse_log, 2) + ' ln' }))
       )
     );
   }
@@ -234,8 +250,7 @@
   // ------------------------------------------------------------------ controls
 
   function chainOptions() {
-    var top = DATA.chain_counts.slice(0, 24);
-    return top.map(function (c) {
+    return DATA.chain_counts.slice(0, 24).map(function (c) {
       return el('option', { value: c.chain, text: c.chain + ' (' + c.count + ')', selected: state.chain === c.chain ? 'selected' : null });
     });
   }
@@ -246,8 +261,6 @@
       state.q = search.value;
       writeHash();
       render();
-      // The page redraws the controls on every keystroke; put the caret back where it was so a
-      // reader can keep typing instead of clicking the field again.
       var again = document.getElementById('q');
       if (again) {
         again.focus();
@@ -317,10 +330,8 @@
 
   function boardTable() {
     var list = sortRows(DATA.rows.filter(matches));
-    // The bar is relative to the rows on screen, so a filtered family still shows its own shape
-    // instead of a row of stubs beside a global maximum none of these rows can reach.
     var listMax = list.reduce(function (m, r) { return Math.max(m, r.implied_value_usd); }, 1);
-    var caption = 'Pre-token protocols, most implied value first. Select a row for its value build-up and farm plan. The amber dot marks a watchlist protocol. This page recomputes every row to the dollar: ' + auditOk + ' / ' + auditAll + '.';
+    var caption = 'Pre-token protocols, most implied value first. Select a row for its fitted build-up and farm plan. The amber dot marks a watchlist protocol. This page re-runs the fit on every row: ' + auditOk + ' / ' + auditAll + ' match the board to the dollar.';
     if (list.length === 0) {
       return el('div', { class: 'panel' }, el('div', { class: 'empty' },
         el('h2', { text: 'Nothing matches this filter' }),
@@ -347,7 +358,7 @@
         )),
         el('td', null, el('span', { class: 'fam', 'data-family': r.family },
           r.family_label,
-          el('span', { class: 'fam-mult', text: fmtFactor(MULT[r.family], 2) + '×' })
+          el('span', { class: 'fam-mult', text: factorText(FAMILY_MULT[r.family] === undefined ? 1 : FAMILY_MULT[r.family]) })
         )),
         el('td', { class: 'cell-num num', text: fmtUsd(r.tvl_usd) }),
         el('td', { class: 'cell-num num ' + (r.change_7d === null ? 'dim' : r.change_7d >= 0 ? 'pos' : 'neg'), text: fmtPct(r.change_7d) }),
@@ -451,39 +462,53 @@
 
   function methodPanel() {
     var ok = auditOk === auditAll;
-    return el('section', { class: 'panel method', 'aria-label': 'Methodology' },
+    return el('section', { class: 'panel method', 'aria-label': 'Methodology and the fit' },
       el('section', null,
-        el('h2', { text: 'What the number means' }),
-        el('p', { text: 'A protocol\'s launch is the token it may issue one day. The radar does not predict whether or when that happens; it asks what a token would be worth if the protocol\'s record stayed as it is. Every row is one formula over three snapshot figures — TVL, seven-day TVL growth and the day DefiLlama began tracking it — plus the number of chains it runs on. No protocol name is special-cased and no row is hand-picked.' }),
+        el('h2', { text: 'A model fitted to the snapshot\'s own tokens' }),
+        el('p', { text: FIT.n + ' protocols in the snapshot record both a TVL and a market cap. That is a labelled set, so the radar estimates its equation from it by least squares instead of asserting multipliers: one log-linear equation, ' + FIT.features + ' terms, closed form, standard library only. The target is the market cap a token would claim from the protocol\'s record — TVL, its seven-day growth, the days it has been listed, its chains and its category family.' }),
         el('p', { class: 'formula' },
-          'implied = round( tvl_usd × category × momentum × maturity × chains )',
-          el('br'),
-          'category: Perp DEX 0.60, DEX 0.55, Lending 0.50, CDP 0.45, RWA 0.45, Yield 0.40, Restaking 0.35, other 0.30',
-          el('br'),
-          'momentum = clamp(1 + change_7d/100 × ' + MODEL.momentum_weight + ', ' + MODEL.momentum_floor + ', ' + MODEL.momentum_cap + '); unreported growth is ' + MODEL.unknown_momentum,
-          el('br'),
-          'maturity = 1 + log10(days since listed)/' + MODEL.maturity_log_divisor + '; an unlisted protocol is ' + MODEL.unknown_maturity,
-          el('br'),
-          'chains = 1 + min(chains − 1, ' + MODEL.chain_cap + ') × ' + MODEL.chain_step + ', so five or more chains stop adding value'
+          'ln(mcap) = ' + fmtNum(FIT.intercept, 4) + (FIT.ln_tvl >= 0 ? ' + ' : ' − ') + fmtNum(Math.abs(FIT.ln_tvl), 4) + '·ln(tvl)'
+            + (FIT.ln_age >= 0 ? ' + ' : ' − ') + fmtNum(Math.abs(FIT.ln_age), 4) + '·ln(age days)'
+            + (FIT.change >= 0 ? ' + ' : ' − ') + fmtNum(Math.abs(FIT.change), 4) + '·' + SCALE + '·tanh(7d/' + SCALE + ')'
+            + (FIT.chains >= 0 ? ' + ' : ' − ') + fmtNum(Math.abs(FIT.chains), 4) + '·chains'
+            + (FIT.age_missing >= 0 ? ' + ' : ' − ') + fmtNum(Math.abs(FIT.age_missing), 4) + '·(no listing date) + family'
+        ),
+        el('p', { text: 'Seven-day change enters through 30·tanh(change/30): the raw percentage for ordinary weeks, never beyond ±30 points, so one protocol\'s +4,448% week cannot set the coefficient or run away with the board. Its coefficient is the model\'s one inside-the-fit prior, +' + fmtNum(FIT.change, 3) + ': the unconstrained fit put it at ' + fmtNum(FIT.change_fitted, 3) + ' ± ' + fmtNum(FIT.change_se, 3) + ' (t ' + fmtNum(FIT.change_t, 1) + '), indistinguishable from zero, and that sign would let a seven-day crash lift a row. The test is printed here; the prior is in the equation. A missing listing date enters at the training median age (' + NF.format(Math.round(MEDIAN_AGE)) + ' days) with its own term. Market caps of zero or below (' + FIT.excluded_nonpositive + ' protocols) cannot be logged and are left out of the fit.' }),
+        el('div', { class: 'stats' },
+          stat('N', NF.format(FIT.n) + ' tokens'),
+          stat('R²', fmtNum(FIT.r2, 3)),
+          stat('Adjusted R²', fmtNum(FIT.adj_r2, 3)),
+          stat('Residual RMSE', fmtNum(FIT.rmse_log, 2) + ' ln'),
+          stat('Holdout', fmtNum(FIT.holdout.rmse_log, 2) + ' ln on ' + FIT.holdout.n)
         ),
         el('p', { class: 'audit', 'data-ok': ok ? 'true' : 'false' },
-          'Page audit: this script recomputes every row from its raw snapshot figures with the formula above. ',
+          'Page audit: this script re-runs the fitted equation on every row from its raw snapshot figures. ',
           el('b', { text: auditOk + ' / ' + auditAll }),
-          ' rows reproduce the dollar board.json carries' + (ok ? ', including the top row.' : '; the rows that differ are listed first on the board and should not be trusted.')
-        )
+          ' rows reproduce the dollar board.json carries' + (ok ? ', including the top row.' : '; the rows that differ should not be trusted.')
+        ),
+        el('p', { text: 'Launch prior: every training row is a token that trades, and a pre-token protocol\'s token does not exist yet. The fitted value is therefore multiplied by ' + FIT.shrink + ' — a stated 35% discount for launch risk and a thin first market. It multiplies every row alike, so it moves no rank. Growth\'s prior changes value, not the evidence: both numbers are named in the equation and neither is hidden.' }),
+        el('p', { text: 'What the fit found, and did not: ln(TVL) is the one strong term (t ' + fmtNum(FIT.ln_tvl / FIT.ln_tvl_se, 1) + '), and the fitted exponent is below 1, so a protocol with more TVL is worth more but at a falling multiple of it. The family effects are estimated from 2 to ' + Math.max.apply(null, FIT.families.map(function (f) { return f.n; })) + ' protocols each, so each is printed with its sample size and t statistic rather than presented as settled. Age and chains are fitted with the signs the data gave them; age\'s is negative and its t is ' + fmtNum(FIT.ln_age / FIT.ln_age_se, 1) + ', a weak effect stated as one.' })
       ),
       el('section', null,
-        el('h2', { text: 'The eight families' }),
-        el('p', { text: 'DefiLlama\'s categories fold into eight families, matched in order so a narrow category wins: a Liquid Restaking protocol is restaking, not staking. The multiple is what the market has paid for a launch in that family, and the multiple is the only place a category can move a row.' }),
+        el('h2', { text: 'Families: fitted effect and observed market' }),
+        el('p', { text: 'The fitted multiplier is exp(coefficient) against the Other base, after controlling for TVL, age, growth and chains. The observed column is the raw median market cap / TVL among that family\'s tokenized protocols — the market\'s own number, with no model in it. They disagree, and both are shown, because a category effect in a regression is not the same thing as a category\'s median ratio.' }),
         el('div', { class: 'family-table' },
-          DATA.family_counts.map(function (f) {
-            var meta = DATA.families.filter(function (x) { return x.key === f.family; })[0];
-            return el('div', { class: 'family-row', 'data-family': f.family },
+          el('div', { class: 'family-row head' },
+            el('span', { class: 'swatch', 'aria-hidden': 'true' }),
+            el('span', { class: 'fname', text: 'Family' }),
+            el('span', { class: 'fcount', text: 'n' }),
+            el('span', { class: 'fmult', text: 'fitted' }),
+            el('span', { class: 'fwhy', text: 'observed mcap/TVL' }),
+            el('span', { class: 'fcount', text: 't' })
+          ),
+          DATA.families.map(function (f) {
+            return el('div', { class: 'family-row', 'data-family': f.key, title: f.why },
               el('span', { class: 'swatch', 'aria-hidden': 'true' }),
               el('span', { class: 'fname', text: f.label }),
-              el('span', { class: 'fmult', text: fmtFactor(meta ? meta.multiple : 0, 2) + '×' }),
-              el('span', { class: 'fwhy', text: meta ? meta.why : '' }),
-              el('span', { class: 'fcount', text: String(f.count) })
+              el('span', { class: 'fcount', text: String(f.n) }),
+              el('span', { class: 'fmult', text: factorText(f.multiplier) }),
+              el('span', { class: 'fwhy', text: f.observed_median_ratio === null ? '—' : f.observed_median_ratio.toFixed(2) }),
+              el('span', { class: 'fcount', text: fmtNum(f.t, 1) })
             );
           })
         )
@@ -491,10 +516,14 @@
     );
   }
 
+  function stat(label, value) {
+    return el('div', { class: 'stat' }, el('span', { text: label }), el('b', { text: value }));
+  }
+
   function footNote() {
     return el('footer', { class: 'foot' },
       el('p', null, el('b', { text: DATA.pre_token_total + ' protocols' }), ' in the snapshot record no token. The watchlist is the floor, never the ceiling: the board adds the pre-token protocols below it, which is where a radar is useful.'),
-      el('p', null, 'Snapshot ' + DATA.as_of + ' · ', el('b', { text: 'implied value is a model of a hypothetical launch, not a promise that one happens' }), '.')
+      el('p', null, 'Snapshot ' + DATA.as_of + ' · ', el('b', { text: 'implied value is the fitted model\'s claim about a hypothetical launch, not a promise that one happens' }), '.')
     );
   }
 
@@ -530,6 +559,7 @@
     dialog.textContent = '';
     var recomputed = recompute(row);
     var same = recomputed === row.implied_value_usd;
+    var t = termsOf(row);
     var inner = el('div', { class: 'detail-inner' });
 
     inner.appendChild(el('div', { class: 'detail-head' },
@@ -547,8 +577,9 @@
       el('span', { class: 'chip', text: row.chains.length + (row.chains.length === 1 ? ' chain' : ' chains') })
     ));
 
-    // The value build-up: every factor the model applied, in the order it applied them.
+    // The build-up: the fitted equation's terms as multiplicative factors, with the running dollar.
     var build = el('div', { class: 'build' });
+    var running = Math.exp(FIT.intercept);
     function buildRow(op, what, note, factor, amount) {
       build.appendChild(el('div', { class: 'build-row' },
         el('span', { class: 'op', text: op }),
@@ -557,28 +588,41 @@
         el('span', { class: 'amount', text: amount })
       ));
     }
-    var factors = factorsOf(row);
-    var running = row.tvl_usd;
-    buildRow('', 'TVL', 'the protocol\'s own deposits', '', fmtDollars(running));
-    running *= factors.category;
-    buildRow('×', 'Category', (row.category || 'unreported') + ' → ' + row.family_label + ' family', fmtFactor(row.model.category_multiple, 2) + '×', fmtDollars(running));
-    running *= factors.momentum;
-    buildRow('×', 'Momentum', row.change_7d === null ? 'seven-day growth not reported' : 'seven-day growth ' + fmtPct(row.change_7d) + (row.model.momentum_clamped ? ' (clamped)' : ''), fmtFactor(factors.momentum, 4) + '×', fmtDollars(running));
-    running *= factors.maturity;
-    buildRow('×', 'Maturity', row.age_days === null ? 'listing date not reported' : fmtAge(row.age_days) + ' with no token', fmtFactor(factors.maturity, 4) + '×', fmtDollars(running));
-    running *= factors.chains;
-    buildRow('×', 'Chains', row.chains.length + ' chains, value stops rising at 5', fmtFactor(factors.chains, 4) + '×', fmtDollars(running));
+    buildRow('=', 'Fitted baseline', 'TVL $1, age 1 day, no growth, Other family', '', fmtDollars(running));
+    var tvlFactor = Math.exp(t.tvlTerm);
+    running *= tvlFactor;
+    buildRow('×', 'TVL ' + fmtUsd(row.tvl_usd), 'ln(TVL) ' + fmtNum(t.lnTvl, 2) + ' × ' + fmtNum(FIT.ln_tvl, 4), factorText(tvlFactor), fmtDollars(running));
+    var ageFactor = Math.exp(t.ageTerm);
+    running *= ageFactor;
+    buildRow('×', 'Age ' + fmtAge(row.age_days), row.age_days === null ? 'no listing date; median ' + NF.format(Math.round(MEDIAN_AGE)) + ' days used' : 'ln(age) × ' + fmtNum(FIT.ln_age, 4), factorText(ageFactor), fmtDollars(running));
+    var changeFactor = Math.exp(t.changeTerm);
+    running *= changeFactor;
+    buildRow('×', 'Seven-day growth ' + fmtPct(row.change_7d), 'bounded ' + fmtNum(t.change, 2) + ' × ' + fmtNum(FIT.change, 4) + ' prior', factorText(changeFactor), fmtDollars(running));
+    var chainFactor = Math.exp(t.chainTerm);
+    running *= chainFactor;
+    buildRow('×', 'Chains ' + t.chains, t.chains + ' × ' + fmtNum(FIT.chains, 4), factorText(chainFactor), fmtDollars(running));
+    var familyMult = FAMILY_MULT[row.family] === undefined ? 1 : FAMILY_MULT[row.family];
+    running *= familyMult;
+    buildRow('×', 'Family ' + row.family_label, 'fitted against Other, n ' + (DATA.families.filter(function (f) { return f.key === row.family; })[0] || { n: 0 }).n, factorText(familyMult), fmtDollars(running));
+    if (t.missing !== 0) {
+      var missFactor = Math.exp(t.missingTerm);
+      running *= missFactor;
+      buildRow('×', 'No listing date', 'the fit\'s own indicator', factorText(missFactor), fmtDollars(running));
+    }
+    running *= FIT.shrink;
+    buildRow('×', 'Launch prior', 'a stated number, not fitted', factorText(FIT.shrink), fmtDollars(running));
+
     var total = el('div', { class: 'build-total' },
       el('span', null, 'Implied value · rank ' + row.rank + ' of ' + DATA.board_size),
       el('b', { text: fmtDollars(row.implied_value_usd) })
     );
     inner.appendChild(el('section', { class: 'detail-section' },
-      el('h3', { text: 'Value build-up' }),
+      el('h3', { text: 'Fitted build-up' }),
       build,
       total,
       el('p', { class: 'check-line ' + (same ? '' : 'bad') },
         el('span', { class: 'check-mark', 'aria-hidden': 'true', text: same ? '✓' : '!' }),
-        el('span', null, 'This page recomputes the row from the snapshot figures: ', el('b', { text: fmtDollars(recomputed) }),
+        el('span', null, 'This page re-runs the fit on the row: ', el('b', { text: fmtDollars(recomputed) }),
           same ? ', the same dollar board.json carries.' : ', which differs from the board; treat the board as stale.')
       )
     ));
@@ -605,13 +649,14 @@
         fact('First listed', fmtDate(row.listed_at)),
         fact('Age with no token', fmtAge(row.age_days)),
         fact('TVL', fmtDollars(row.tvl_usd)),
+        fact('Implied / TVL', (row.implied_value_usd / row.tvl_usd * 100).toFixed(2) + '%'),
         fact('Seven-day change', fmtPct(row.change_7d)),
         fact('Chains', String(row.chains.length)),
         fact('Token on record', 'none (gecko id and symbol null)')
       )
     ));
     inner.appendChild(el('p', { class: 'foot', style: 'border:0;margin-top:24px' },
-      'Implied value is this radar\'s claim about a hypothetical token, not make.fun\'s and not a prediction that one is issued. Farm only what you can afford to leave in place.'));
+      'Implied value is the fitted model\'s claim about a hypothetical token, not make.fun\'s and not a prediction that one is issued. Farm only what you can afford to leave in place.'));
 
     dialog.appendChild(inner);
     showDialog();
@@ -639,7 +684,7 @@
         row.symbol ? el('span', { class: 'chip', text: '$' + row.symbol }) : null
       ),
       el('div', { class: 'live-note' },
-        'This protocol\'s token already trades, so its market cap is a fact rather than a model. It is listed here so the two groups are visible side by side, and it carries no rank, no implied value and no farm plan: there is no launch to farm.'),
+        'This protocol\'s token already trades, so its market cap is a fact rather than a model. It is listed here so the two groups are visible side by side; it carries no rank, no implied value and no farm plan, and it is one of the ' + FIT.n + ' protocols the fit learned from.'),
       el('section', { class: 'detail-section' },
         el('h3', { text: 'Market facts' }),
         el('dl', { class: 'facts' },
