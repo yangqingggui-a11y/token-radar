@@ -185,7 +185,8 @@
     tvl: function (r) { return r.tvl_usd; },
     change: function (r) { return r.change_7d === null || r.change_7d === undefined ? -Infinity : r.change_7d; },
     age: function (r) { return r.age_days === null || r.age_days === undefined ? -1 : r.age_days; },
-    mcap: function (r) { return r.mcap_usd || 0; }
+    mcap: function (r) { return r.mcap_usd || 0; },
+    cost: function (r) { return r.farm ? r.farm.cost_per_million_implied_usd : 0; }
   };
 
   function sortRows(list) {
@@ -331,7 +332,7 @@
   function boardTable() {
     var list = sortRows(DATA.rows.filter(matches));
     var listMax = list.reduce(function (m, r) { return Math.max(m, r.implied_value_usd); }, 1);
-    var caption = 'Pre-token protocols, most implied value first. Select a row for its fitted build-up and farm plan. The amber dot marks a watchlist protocol. This page re-runs the fit on every row: ' + auditOk + ' / ' + auditAll + ' match the board to the dollar.';
+    var caption = 'Pre-token protocols, most implied value first. Select a row for its fitted build-up and farm plan. The amber dot marks a watchlist protocol; Farm $/M is the plan\'s own total cost per $1M of implied value. This page re-runs the fit on every row: ' + auditOk + ' / ' + auditAll + ' match the board to the dollar.';
     if (list.length === 0) {
       return el('div', { class: 'panel' }, el('div', { class: 'empty' },
         el('h2', { text: 'Nothing matches this filter' }),
@@ -366,7 +367,8 @@
         el('td', { class: 'cell-num' }, el('div', { class: 'implied' },
           el('span', { class: 'bar', 'aria-hidden': 'true' }, el('i', { style: 'width:' + Math.max(2, Math.round((r.implied_value_usd / listMax) * 100)) + '%' })),
           el('span', { class: 'value', text: fmtUsd(r.implied_value_usd) })
-        ))
+        )),
+        el('td', { class: 'cell-num num dim', text: '$' + r.farm.cost_per_million_implied_usd.toFixed(1), title: 'Total farm cost per $1M of implied value: ' + fmtDollars(r.farm.total_usd) + ' over ' + r.farm.hold_days + ' days' })
       );
       tr.addEventListener('click', function () { openDetail(r.slug); });
       tr.addEventListener('keydown', function (e) {
@@ -385,7 +387,8 @@
             sortHeader('tvl', 'TVL', 'cell-num'),
             sortHeader('change', '7 days', 'cell-num'),
             sortHeader('age', 'Age', 'cell-num'),
-            sortHeader('implied', 'Implied value', 'cell-num')
+            sortHeader('implied', 'Implied value', 'cell-num'),
+            sortHeader('cost', 'Farm $/M', 'cell-num')
           )),
           tbody
         )
@@ -486,8 +489,8 @@
           el('b', { text: auditOk + ' / ' + auditAll }),
           ' rows reproduce the dollar board.json carries' + (ok ? ', including the top row.' : '; the rows that differ should not be trusted.')
         ),
-        el('p', { text: 'Launch prior: every training row is a token that trades, and a pre-token protocol\'s token does not exist yet. The fitted value is therefore multiplied by ' + FIT.shrink + ' — a stated 35% discount for launch risk and a thin first market. It multiplies every row alike, so it moves no rank. Growth\'s prior changes value, not the evidence: both numbers are named in the equation and neither is hidden.' }),
-        el('p', { text: 'What the fit found, and did not: ln(TVL) is the one strong term (t ' + fmtNum(FIT.ln_tvl / FIT.ln_tvl_se, 1) + '), and the fitted exponent is below 1, so a protocol with more TVL is worth more but at a falling multiple of it. The family effects are estimated from 2 to ' + Math.max.apply(null, FIT.families.map(function (f) { return f.n; })) + ' protocols each, so each is printed with its sample size and t statistic rather than presented as settled. Age and chains are fitted with the signs the data gave them; age\'s is negative and its t is ' + fmtNum(FIT.ln_age / FIT.ln_age_se, 1) + ', a weak effect stated as one.' })
+        el('p', { text: 'Launch prior: every training row is a token that trades, and a pre-token protocol\'s token does not exist yet. The fitted value is therefore multiplied by ' + FIT.shrink + ' — a stated 35% discount for launch risk and a thin first market. It multiplies every row alike, so it moves no rank; growth\'s prior changes value, not the evidence.' }),
+        el('p', { text: 'What the fit found, and did not: ln(TVL) is the one strong term (t ' + fmtNum(FIT.ln_tvl / FIT.ln_tvl_se, 1) + '), and its exponent is below 1, so a protocol with more TVL is worth more at a falling multiple of it. Family effects rest on 2 to ' + Math.max.apply(null, FIT.families.map(function (f) { return f.n; })) + ' protocols each, so each prints its sample size and t rather than posing as settled. Age and chains keep the signs the data gave; age\'s is negative and its t is ' + fmtNum(FIT.ln_age / FIT.ln_age_se, 1) + ', a weak effect stated as one.' })
       ),
       el('section', null,
         el('h2', { text: 'Families: fitted effect and observed market' }),
@@ -542,13 +545,15 @@
   }
 
   function stepParts(step) {
-    var costAt = step.indexOf(' Cost: ');
-    var action = costAt >= 0 ? step.slice(0, costAt) : step;
-    var rest = costAt >= 0 ? step.slice(costAt + 7) : '';
-    var timeAt = rest.indexOf('. Time: ');
-    var cost = timeAt >= 0 ? rest.slice(0, timeAt) : rest;
-    var time = timeAt >= 0 ? rest.slice(timeAt + 8) : '';
-    return { action: action, cost: cost, time: time.replace(/\.$/, '') };
+    var timeAt = step.lastIndexOf('Time: ');
+    var costAt = step.lastIndexOf('Cost: ', timeAt);
+    var preAt = step.lastIndexOf('Prerequisite: ', costAt);
+    var action = preAt >= 0 ? step.slice(0, preAt) : costAt >= 0 ? step.slice(0, costAt) : step;
+    var pre = preAt >= 0 && costAt > preAt ? step.slice(preAt + 14, costAt) : '';
+    var cost = costAt >= 0 && timeAt > costAt ? step.slice(costAt + 6, timeAt) : '';
+    var time = timeAt >= 0 ? step.slice(timeAt + 6) : '';
+    function clean(s) { return s.trim().replace(/\.$/, ''); }
+    return { action: clean(action), pre: clean(pre), cost: clean(cost), time: clean(time) };
   }
 
   function openDetail(slug) {
@@ -628,12 +633,19 @@
     ));
 
     inner.appendChild(el('section', { class: 'detail-section' },
-      el('h3', { text: 'Farm plan · cost and time on every step' }),
+      el('h3', { text: 'Farm plan · prerequisite, cost and time on every step' }),
+      el('p', { class: 'farm-cost' },
+        'Total ', el('b', { text: fmtDollars(row.farm.total_usd) }),
+        ' (' + fmtDollars(row.farm.capital_usd) + ' capital + ' + fmtDollars(row.farm.gas_usd) + ' gas over ' + row.farm.hold_days + ' days) · ',
+        el('b', { text: '$' + row.farm.cost_per_million_implied_usd.toFixed(2) }), ' per $1M of implied value · ',
+        el('b', { text: row.farm.cost_bp_of_implied.toFixed(2) }), ' bp'
+      ),
       el('ol', { class: 'steps' }, row.farm_steps.map(function (s) {
         var parts = stepParts(s);
         return el('li', null,
           el('p', { class: 'action', text: parts.action }),
           el('div', { class: 'meta' },
+            parts.pre ? el('span', { class: 'pre', text: 'Needs: ' + parts.pre }) : null,
             parts.cost ? el('span', { class: 'cost', text: 'Cost: ' + parts.cost }) : null,
             parts.time ? el('span', { text: 'Time: ' + parts.time }) : null
           )

@@ -139,6 +139,18 @@ export interface ModelBreakdown {
   shrink: number;
 }
 
+/** What a farm plan costs to run, and what that cost is against the row's implied value. */
+export interface FarmCost {
+  capital_usd: number;
+  gas_usd: number;
+  total_usd: number;
+  hold_days: number;
+  /** Total cost divided by implied value, in basis points (1 bp = 0.01%). */
+  cost_bp_of_implied: number;
+  /** Dollars of total cost per $1,000,000 of implied value: the cross-row comparison. */
+  cost_per_million_implied_usd: number;
+}
+
 /** One row of board.json, and of the dashboard's data. */
 export interface BoardRow {
   rank: number;
@@ -158,6 +170,7 @@ export interface BoardRow {
   token_status: 'pre-token';
   implied_value_usd: number;
   model: ModelBreakdown;
+  farm: FarmCost;
   farm_steps: string[];
 }
 
@@ -641,26 +654,30 @@ export function buildBoard(snapshot: Snapshot, fit: Fit): BoardRow[] {
     }
   }
 
-  return scored.map((s, i) => ({
-    rank: i + 1,
-    slug: s.p.slug,
-    name: s.p.name,
-    category: s.p.category,
-    family: s.family,
-    family_label: familyLabel(s.family),
-    chains: s.p.chains,
-    chain_count: s.p.chains.length,
-    tvl_usd: s.p.tvl_usd,
-    change_7d: s.p.change_7d,
-    mcap_usd: s.p.mcap_usd,
-    listed_at: s.p.listed_at,
-    age_days: s.age,
-    watchlist: snapshot.watchlist.includes(s.p.slug),
-    token_status: 'pre-token',
-    implied_value_usd: s.implied,
-    model: s.breakdown,
-    farm_steps: farmPlan(s.p, s.age, s.family),
-  }));
+  return scored.map((s, i) => {
+    const farm = farmCostOf(s.p, s.age, s.implied);
+    return {
+      rank: i + 1,
+      slug: s.p.slug,
+      name: s.p.name,
+      category: s.p.category,
+      family: s.family,
+      family_label: familyLabel(s.family),
+      chains: s.p.chains,
+      chain_count: s.p.chains.length,
+      tvl_usd: s.p.tvl_usd,
+      change_7d: s.p.change_7d,
+      mcap_usd: s.p.mcap_usd,
+      listed_at: s.p.listed_at,
+      age_days: s.age,
+      watchlist: snapshot.watchlist.includes(s.p.slug),
+      token_status: 'pre-token',
+      implied_value_usd: s.implied,
+      model: s.breakdown,
+      farm,
+      farm_steps: farmPlan(s.p, s.age, s.family, farm),
+    };
+  });
 }
 
 /** Code-unit order, so the board's ordering never depends on a locale. */
@@ -731,21 +748,45 @@ function actionFor(p: SnapshotProtocol, family: string, capital: number, chain: 
  * protocol's own record (category, chains, TVL, age), so two protocols with the same record get the
  * same plan and no name is hand-written.
  */
-export function farmPlan(p: SnapshotProtocol, age: number | null, family: string): string[] {
-  const chain = p.chains.length > 0 ? p.chains[0]! : 'its main chain';
+export function farmCostOf(p: SnapshotProtocol, age: number | null, implied: number): FarmCost {
   const capital = capitalFor(p.tvl_usd);
   const hold = holdDaysFor(age);
+  const gas = gasFor(p.chains);
+  // One funding and one setup transaction, two weekly transactions (a qualifying move and a top-up)
+  // for the hold window, and one exit. Rounded to the cent so the plan's text and its total agree.
+  const events = 2 + 2 * Math.ceil(hold / 7) + 1;
+  const gasTotal = Math.round(gas * events * 100) / 100;
+  const total = Math.round((capital + gasTotal) * 100) / 100;
+  return {
+    capital_usd: capital,
+    gas_usd: gasTotal,
+    total_usd: total,
+    hold_days: hold,
+    cost_bp_of_implied: Math.round((total / implied) * 1e6) / 1e2,
+    cost_per_million_implied_usd: Math.round((total / (implied / 1e6)) * 100) / 100,
+  };
+}
+
+/**
+ * A protocol's farm plan: seven steps, each an action with its prerequisite, its cost and its time.
+ * Every input is the protocol's own record (category, chains, TVL, age) and the plan's own total, so
+ * two protocols with the same record get the same plan and no name is hand-written.
+ */
+export function farmPlan(p: SnapshotProtocol, age: number | null, family: string, farm: FarmCost): string[] {
+  const chain = p.chains.length > 0 ? p.chains[0]! : 'its main chain';
+  const capital = farm.capital_usd;
+  const hold = farm.hold_days;
   const gas = gasFor(p.chains);
   const action = actionFor(p, family, capital, chain);
   const tvl = `$${(p.tvl_usd / 1e6).toFixed(1)}M`;
   const steps = [
-    `Open a fresh wallet that will hold only this farm's funds and write its recovery phrase on paper; do not reuse a wallet that already holds balances. Cost: ${dollars(gas)} of gas to fund it the first time. Time: 10 minutes.`,
-    `${action} Cost: ${dollars(capital)} of capital plus about ${dollars(gas)} of gas. Time: 20 minutes to set up.`,
-    `Keep the position above a fifth of your deposit at all times and top it up after any market move, because a liquidated position earns nothing. Cost: no fee to check, ${dollars(gas)} to top up. Time: 5 minutes a week.`,
-    `Return once a week to make one qualifying move, a supply, a borrow, a swap or a governance vote, so the wallet is active in every seven-day window. Cost: about ${dollars(gas * 4)} a month in gas. Time: 10 minutes a week.`,
-    `Hold for at least ${hold} days so the activity covers more than one snapshot and a full points season. Cost: the ${dollars(capital)} stays in the position and is not spendable. Time: ${hold} days.`,
-    `Check that the protocol's TVL of ${tvl} is at least ten times your position, read the contract address from its own documentation, and claim rewards only on its official page, never through a link someone sends you. Cost: no fee, and never pay to claim. Time: 15 minutes.`,
-    `Withdraw into the same asset you deposited, then record the dates, the amounts and every transaction hash in a farm log so the position can be repeated or audited. Cost: about ${dollars(gas)} of gas to exit. Time: 20 minutes.`,
+    `Open a fresh wallet for this farm alone and write its recovery phrase on paper; never reuse a wallet that already holds balances. Prerequisite: none. Cost: ${dollars(gas)} of gas to fund it. Time: 10 minutes.`,
+    `${action} Prerequisite: the wallet holds ${dollars(capital + gas)} of USDC on ${chain}. Cost: ${dollars(capital)} of capital plus ${dollars(gas)} of gas. Time: 20 minutes.`,
+    `Check the position every week and top it up after any market move, because a liquidated position earns nothing. Prerequisite: the position is open. Cost: ${dollars(gas)} per top-up. Time: 5 minutes a week.`,
+    `Make one qualifying move each week, a supply, a borrow, a swap or a governance vote, so the wallet is active in every seven-day window. Prerequisite: the position is open. Cost: about ${dollars(gas)} a week in gas. Time: 10 minutes a week.`,
+    `Hold for at least ${hold} days so the activity covers more than one snapshot and a full points season. Prerequisite: the weekly cadence above. Cost: the ${dollars(capital)} stays locked for ${hold} days. Time: ${hold} days.`,
+    `Read the contract address from the protocol's own documentation and check that its ${tvl} TVL is at least ten times your position before adding funds. Prerequisite: the protocol's docs. Cost: no fee. Time: 15 minutes.`,
+    `Withdraw into the same asset you deposited, then record the dates, the amounts and every transaction hash in a farm log so the position can be repeated or audited. Prerequisite: the hold window has ended. Cost: ${dollars(gas)} of gas to exit. Time: 20 minutes.`,
   ];
   return steps.map((s) => (s.length > 600 ? `${s.slice(0, 596)}...` : s));
 }
