@@ -468,7 +468,7 @@
     return el('section', { class: 'panel method', 'aria-label': 'Methodology and the fit' },
       el('section', null,
         el('h2', { text: 'A model fitted to the snapshot\'s own tokens' }),
-        el('p', { text: FIT.n + ' protocols in the snapshot record both a TVL and a market cap. That is a labelled set, so the radar estimates its equation from it by least squares instead of asserting multipliers: one log-linear equation, ' + FIT.features + ' terms, closed form, standard library only. The target is the market cap a token would claim from the protocol\'s record — TVL, its seven-day growth, the days it has been listed, its chains and its category family.' }),
+        el('p', { text: FIT.n + ' protocols record both a TVL and a market cap. That labelled set lets the radar estimate its equation by least squares instead of asserting multipliers: one log-linear equation, ' + FIT.features + ' terms, closed form, standard library only. The target is the market cap a token would claim from the protocol\'s record — TVL, growth, listed days, chains and family.' }),
         el('p', { class: 'formula' },
           'ln(mcap) = ' + fmtNum(FIT.intercept, 4) + (FIT.ln_tvl >= 0 ? ' + ' : ' − ') + fmtNum(Math.abs(FIT.ln_tvl), 4) + '·ln(tvl)'
             + (FIT.ln_age >= 0 ? ' + ' : ' − ') + fmtNum(Math.abs(FIT.ln_age), 4) + '·ln(age days)'
@@ -476,7 +476,7 @@
             + (FIT.chains >= 0 ? ' + ' : ' − ') + fmtNum(Math.abs(FIT.chains), 4) + '·chains'
             + (FIT.age_missing >= 0 ? ' + ' : ' − ') + fmtNum(Math.abs(FIT.age_missing), 4) + '·(no listing date) + family'
         ),
-        el('p', { text: 'Seven-day change enters through 30·tanh(change/30): the raw percentage for ordinary weeks, never beyond ±30 points, so one protocol\'s +4,448% week cannot set the coefficient or run away with the board. Its coefficient is the model\'s one inside-the-fit prior, +' + fmtNum(FIT.change, 3) + ': the unconstrained fit put it at ' + fmtNum(FIT.change_fitted, 3) + ' ± ' + fmtNum(FIT.change_se, 3) + ' (t ' + fmtNum(FIT.change_t, 1) + '), indistinguishable from zero, and that sign would let a seven-day crash lift a row. The test is printed here; the prior is in the equation. A missing listing date enters at the training median age (' + NF.format(Math.round(MEDIAN_AGE)) + ' days) with its own term. Market caps of zero or below (' + FIT.excluded_nonpositive + ' protocols) cannot be logged and are left out of the fit.' }),
+        el('p', { text: 'Seven-day change is bounded by 30·tanh(change/30), so one protocol\'s +4,448% week cannot set the coefficient. Its +' + fmtNum(FIT.change, 3) + ' coefficient is a stated prior: the unconstrained fit gave ' + fmtNum(FIT.change_fitted, 3) + ' ± ' + fmtNum(FIT.change_se, 3) + ' (t ' + fmtNum(FIT.change_t, 1) + '), and that sign would let a seven-day crash lift a row. A missing listing date enters at the median age (' + NF.format(Math.round(MEDIAN_AGE)) + ' days); market caps of zero or below (' + FIT.excluded_nonpositive + ') are not fitted.' }),
         el('div', { class: 'stats' },
           stat('N', NF.format(FIT.n) + ' tokens'),
           stat('R²', fmtNum(FIT.r2, 3)),
@@ -489,7 +489,7 @@
           el('b', { text: auditOk + ' / ' + auditAll }),
           ' rows reproduce the dollar board.json carries' + (ok ? ', including the top row.' : '; the rows that differ should not be trusted.')
         ),
-        el('p', { text: 'Launch prior: every training row is a token that trades, and a pre-token protocol\'s token does not exist yet. The fitted value is therefore multiplied by ' + FIT.shrink + ' — a stated 35% discount for launch risk and a thin first market. It multiplies every row alike, so it moves no rank; growth\'s prior changes value, not the evidence.' }),
+        el('p', { text: 'Launch prior: every training row is a token that trades; a pre-token protocol\'s token does not exist yet. The fitted value is multiplied by ' + FIT.shrink + ', a stated 35% launch-risk discount. It multiplies every row alike, so it moves no rank; growth\'s prior changes value, not the evidence.' }),
         el('p', { text: 'What the fit found, and did not: ln(TVL) is the one strong term (t ' + fmtNum(FIT.ln_tvl / FIT.ln_tvl_se, 1) + '), and its exponent is below 1, so a protocol with more TVL is worth more at a falling multiple of it. Family effects rest on 2 to ' + Math.max.apply(null, FIT.families.map(function (f) { return f.n; })) + ' protocols each, so each prints its sample size and t rather than posing as settled. Age and chains keep the signs the data gave; age\'s is negative and its t is ' + fmtNum(FIT.ln_age / FIT.ln_age_se, 1) + ', a weak effect stated as one.' })
       ),
       el('section', null,
@@ -582,47 +582,53 @@
       el('span', { class: 'chip', text: row.chains.length + (row.chains.length === 1 ? ' chain' : ' chains') })
     ));
 
-    // The build-up: the fitted equation's terms as multiplicative factors, with the running dollar.
-    var build = el('div', { class: 'build' });
-    var running = Math.exp(FIT.intercept);
-    function buildRow(op, what, note, factor, amount) {
-      build.appendChild(el('div', { class: 'build-row' },
-        el('span', { class: 'op', text: op }),
-        el('span', { class: 'what' }, what, note ? el('span', { text: note }) : null),
-        factor ? el('span', { class: 'factor', text: factor }) : el('span', null),
-        el('span', { class: 'amount', text: amount })
+    // The waterfall: the fitted equation is additive in log space, so each term is one bar and the
+    // bars add to ln(implied before rounding). It shows which term moved the row, and by how much.
+    var build = el('div', { class: 'wf' });
+    var terms = [
+      { label: 'Intercept', delta: FIT.intercept, note: 'TVL $1 · age 1' },
+      { label: 'TVL', delta: t.tvlTerm, note: fmtUsd(row.tvl_usd) },
+      { label: 'Age', delta: t.ageTerm, note: fmtAge(row.age_days) },
+      { label: 'Growth', delta: t.changeTerm, note: fmtPct(row.change_7d) },
+      { label: 'Chains', delta: t.chainTerm, note: t.chains + (t.chains === 1 ? ' chain' : ' chains') },
+      { label: 'Family', delta: t.family, note: row.family_label },
+      { label: 'Launch prior', delta: Math.log(FIT.shrink), note: 'stated' }
+    ];
+    if (t.missing !== 0) terms.push({ label: 'No listing date', delta: t.missingTerm, note: 'indicator' });
+    var scale = 0;
+    var cum = 0;
+    terms.forEach(function (term) {
+      cum += term.delta;
+      scale = Math.max(scale, Math.abs(cum), Math.abs(cum - term.delta));
+    });
+    cum = 0;
+    terms.forEach(function (term) {
+      var start = cum;
+      var end = cum + term.delta;
+      cum = end;
+      var left = Math.max(0, (Math.min(start, end) / scale) * 100);
+      var width = (Math.abs(term.delta) / scale) * 100;
+      build.appendChild(el('div', { class: 'wf-row' },
+        el('span', { class: 'wf-label', text: term.label }),
+        el('span', { class: 'wf-track' }, el('i', { class: term.delta >= 0 ? 'pos' : 'neg', style: 'left:' + left.toFixed(2) + '%;width:' + Math.max(0.5, width).toFixed(2) + '%' })),
+        el('span', { class: 'wf-val ' + (term.delta >= 0 ? 'pos' : 'neg'), text: (term.delta >= 0 ? '+' : '−') + Math.abs(term.delta).toFixed(2) }),
+        el('span', { class: 'wf-note', text: term.note })
       ));
-    }
-    buildRow('=', 'Fitted baseline', 'TVL $1, age 1 day, no growth, Other family', '', fmtDollars(running));
-    var tvlFactor = Math.exp(t.tvlTerm);
-    running *= tvlFactor;
-    buildRow('×', 'TVL ' + fmtUsd(row.tvl_usd), 'ln(TVL) ' + fmtNum(t.lnTvl, 2) + ' × ' + fmtNum(FIT.ln_tvl, 4), factorText(tvlFactor), fmtDollars(running));
-    var ageFactor = Math.exp(t.ageTerm);
-    running *= ageFactor;
-    buildRow('×', 'Age ' + fmtAge(row.age_days), row.age_days === null ? 'no listing date; median ' + NF.format(Math.round(MEDIAN_AGE)) + ' days used' : 'ln(age) × ' + fmtNum(FIT.ln_age, 4), factorText(ageFactor), fmtDollars(running));
-    var changeFactor = Math.exp(t.changeTerm);
-    running *= changeFactor;
-    buildRow('×', 'Seven-day growth ' + fmtPct(row.change_7d), 'bounded ' + fmtNum(t.change, 2) + ' × ' + fmtNum(FIT.change, 4) + ' prior', factorText(changeFactor), fmtDollars(running));
-    var chainFactor = Math.exp(t.chainTerm);
-    running *= chainFactor;
-    buildRow('×', 'Chains ' + t.chains, t.chains + ' × ' + fmtNum(FIT.chains, 4), factorText(chainFactor), fmtDollars(running));
-    var familyMult = FAMILY_MULT[row.family] === undefined ? 1 : FAMILY_MULT[row.family];
-    running *= familyMult;
-    buildRow('×', 'Family ' + row.family_label, 'fitted against Other, n ' + (DATA.families.filter(function (f) { return f.key === row.family; })[0] || { n: 0 }).n, factorText(familyMult), fmtDollars(running));
-    if (t.missing !== 0) {
-      var missFactor = Math.exp(t.missingTerm);
-      running *= missFactor;
-      buildRow('×', 'No listing date', 'the fit\'s own indicator', factorText(missFactor), fmtDollars(running));
-    }
-    running *= FIT.shrink;
-    buildRow('×', 'Launch prior', 'a stated number, not fitted', factorText(FIT.shrink), fmtDollars(running));
+    });
+    build.appendChild(el('div', { class: 'wf-row sum' },
+      el('span', { class: 'wf-label', text: 'Implied' }),
+      el('span', { class: 'wf-track' }, el('i', { class: 'sum', style: 'left:0;width:100%' })),
+      el('span', { class: 'wf-val', text: fmtNum(t.z + Math.log(FIT.shrink), 2) }),
+      el('span', { class: 'wf-note', text: fmtUsd(row.implied_value_usd) })
+    ));
 
     var total = el('div', { class: 'build-total' },
       el('span', null, 'Implied value · rank ' + row.rank + ' of ' + DATA.board_size),
       el('b', { text: fmtDollars(row.implied_value_usd) })
     );
     inner.appendChild(el('section', { class: 'detail-section' },
-      el('h3', { text: 'Fitted build-up' }),
+      el('h3', { text: 'Fitted build-up · log-point waterfall' }),
+      el('p', { class: 'wf-cap', text: 'Each bar is one term of ln(mcap); the bars add to ' + fmtNum(t.z + Math.log(FIT.shrink), 2) + ', and exp of that is the implied value before rounding.' }),
       build,
       total,
       el('p', { class: 'check-line ' + (same ? '' : 'bad') },
